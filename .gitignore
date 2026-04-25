@@ -1,0 +1,17 @@
+# Virtual environment
+venv/
+
+# Python cache
+__pycache__/
+*.py[cod]
+
+# Internal notes
+memory.md
+convert.md
+
+# Training log (regenerated each run)
+models/train_log.txt
+
+# Raw dataset files (large binaries — download from Mendeley)
+data/raw/
+data/*.zip
