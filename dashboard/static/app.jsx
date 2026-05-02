@@ -263,6 +263,908 @@ function EventRow({ ev }) {
   );
 }
 
+// ── Live Monitor Components (Wake-based ESP32 v2) ──────
+
+// Connection status badge
+function StatusBadge({ status }) {
+  const cfg = {
+    'Disconnected': { cls: 'bg-slate-700/80 text-slate-300 border border-slate-600',        icon: 'fa-circle-xmark' },
+    'Connecting':   { cls: 'bg-yellow-500/20 text-yellow-300 border border-yellow-500/30',  icon: 'fa-spinner fa-spin' },
+    'Connected':    { cls: 'bg-green-500/20  text-green-400  border border-green-500/30',   icon: 'fa-circle' },
+    'Error':        { cls: 'bg-red-500/20    text-red-400    border border-red-500/30',     icon: 'fa-triangle-exclamation' },
+  }[status] || { cls: 'bg-slate-700 text-slate-300', icon: 'fa-circle-xmark' };
+  return (
+    <span className={`inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-[11px] font-semibold ${cfg.cls}`}>
+      <i className={`fa-solid ${cfg.icon} text-[9px]`}></i>
+      {status}
+    </span>
+  );
+}
+
+// ── Location / Channel card (Building M or Building C) ─
+function LocationCard({ chNum, location, building, status, active, sw, mag, x, y, z, lastTime }) {
+  // Visual theme per state
+  const isSleep    = status === 'SLEEP'             || !status;
+  const isMonitor  = status === 'MONITORING';
+  const isActivity = status === 'ACTIVITY_DETECTED';
+
+  const cardCls = isActivity
+    ? 'border-red-500/60 shadow-red-500/10 shadow-xl bg-slate-900'
+    : isMonitor
+    ? 'border-cyan-500/50 shadow-cyan-500/10 shadow-lg bg-slate-900'
+    : 'border-slate-800 bg-slate-900/70';
+
+  const headerGlow = isActivity
+    ? 'from-red-900/30 to-transparent'
+    : isMonitor
+    ? 'from-cyan-900/20 to-transparent'
+    : 'from-slate-800/40 to-transparent';
+
+  const statusBadge = isActivity
+    ? 'bg-red-500/20 text-red-400 border border-red-500/40 animate-pulse'
+    : isMonitor
+    ? 'bg-cyan-500/20 text-cyan-300 border border-cyan-500/30'
+    : 'bg-slate-700/60 text-slate-400 border border-slate-600/40';
+
+  const statusIcon = isActivity ? 'fa-triangle-exclamation' : isMonitor ? 'fa-satellite-dish' : 'fa-moon';
+
+  const statusLabel = isActivity
+    ? 'ACTIVITY DETECTED'
+    : isMonitor
+    ? 'MONITORING'
+    : 'SLEEP';
+
+  const statusDesc = isActivity
+    ? 'Possible leak activity detected'
+    : isMonitor
+    ? 'Wake trigger received — collecting 10 seconds of accelerometer data'
+    : 'Sleeping — still reading background sensor values';
+
+  const accentColor = isActivity ? 'text-red-400' : isMonitor ? 'text-cyan-400' : 'text-slate-500';
+  const magColor    = isActivity ? 'text-red-300' : isMonitor ? 'text-cyan-300' : 'text-slate-400';
+
+  return (
+    <div className={`rounded-2xl border transition-all duration-500 overflow-hidden ${cardCls}`}>
+      {/* Header strip */}
+      <div className={`bg-gradient-to-r ${headerGlow} px-5 pt-4 pb-3`}>
+        <div className="flex items-start justify-between gap-3">
+          <div className="flex items-center gap-3">
+            {/* Building icon */}
+            <div className={`p-3 rounded-xl border transition-colors ${
+              isActivity ? 'bg-red-500/15 border-red-500/30'
+              : isMonitor ? 'bg-cyan-500/15 border-cyan-500/30'
+              : 'bg-slate-800 border-slate-700'}`}>
+              <i className={`fa-solid fa-building ${accentColor} text-lg`}></i>
+            </div>
+            <div>
+              <p className="text-[10px] uppercase tracking-widest text-slate-500 font-semibold">Location · Channel {chNum}</p>
+              <h3 className="font-extrabold text-white text-base leading-tight">{building}</h3>
+              <p className="text-[11px] text-slate-400">{location}</p>
+            </div>
+          </div>
+          {/* Status badge */}
+          <span className={`inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-[11px] font-bold whitespace-nowrap ${statusBadge}`}>
+            <i className={`fa-solid ${statusIcon} text-[9px]`}></i>
+            {statusLabel}
+          </span>
+        </div>
+
+        {/* Status description line */}
+        <p className={`mt-2 text-[11px] ${isActivity ? 'text-red-300/80' : isMonitor ? 'text-cyan-300/80' : 'text-slate-500'} leading-relaxed`}>
+          {statusDesc}
+        </p>
+      </div>
+
+      {/* Body */}
+      <div className="px-5 pb-5 pt-3 flex flex-col gap-4">
+
+        {/* Active window + SW trigger row */}
+        <div className="flex items-center gap-3">
+          <div className={`flex-1 flex items-center gap-2 rounded-lg px-3 py-2 border transition-colors ${
+            active ? 'bg-cyan-500/10 border-cyan-500/25' : 'bg-slate-800/50 border-slate-700/40'}`}>
+            <i className={`fa-solid fa-clock-rotate-left text-[11px] ${active ? 'text-cyan-400' : 'text-slate-500'}`}></i>
+            <span className={`text-[11px] font-semibold ${active ? 'text-cyan-300' : 'text-slate-500'}`}>
+              {active ? '~10s Detection Window Active' : 'Detection Window: OFF'}
+            </span>
+            {active && <span className="ml-auto w-2 h-2 rounded-full bg-cyan-400 animate-ping inline-block"></span>}
+          </div>
+          <div className={`flex items-center gap-2 rounded-lg px-3 py-2 border transition-colors ${
+            sw ? 'bg-orange-500/15 border-orange-500/30' : 'bg-slate-800/50 border-slate-700/40'}`}>
+            <i className={`fa-solid fa-bolt text-[11px] ${sw ? 'text-orange-400' : 'text-slate-500'}`}></i>
+            <span className={`text-[11px] font-bold ${sw ? 'text-orange-300' : 'text-slate-500'}`}>
+              SW-420: {sw ? '1 · TRIGGERED' : '0 · Idle'}
+            </span>
+          </div>
+        </div>
+
+        {/* Accelerometer readings */}
+        <div>
+          <p className="text-[10px] text-slate-500 uppercase tracking-wider mb-2 font-semibold">
+            ADXL345 · Pipe Vibration
+            <span className="ml-2 text-[9px] text-slate-600 normal-case font-normal">
+              {isSleep ? '(background readings)' : ''}
+            </span>
+          </p>
+          <div className="grid grid-cols-4 gap-2">
+            <div className={`rounded-lg px-3 py-2.5 border text-center ${isActivity ? 'bg-red-500/10 border-red-500/20' : isMonitor ? 'bg-cyan-500/10 border-cyan-500/20' : 'bg-slate-800/50 border-slate-700/30'}`}>
+              <p className="text-[9px] text-slate-500 uppercase tracking-wider">Magnitude</p>
+              <p className={`text-xl font-extrabold font-mono mt-0.5 ${magColor}`}>{mag !== null ? mag.toFixed(3) : '—'}</p>
+              <p className="text-[9px] text-slate-500 mt-0.5">g</p>
+            </div>
+            {[['X', x], ['Y', y], ['Z', z]].map(([axis, val]) => (
+              <div key={axis} className="bg-slate-800/40 border border-slate-700/30 rounded-lg px-3 py-2.5 text-center">
+                <p className="text-[9px] text-slate-500 uppercase tracking-wider">{axis}-axis</p>
+                <p className="text-base font-bold font-mono text-slate-300 mt-0.5">{val !== null ? val.toFixed(3) : '—'}</p>
+                <p className="text-[9px] text-slate-500 mt-0.5">g</p>
+              </div>
+            ))}
+          </div>
+        </div>
+
+        {/* Last update */}
+        {lastTime && (
+          <p className="text-[10px] text-slate-600 text-right font-mono">Last update: {lastTime}</p>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// Wrapper card for a live Recharts chart
+function LiveChartCard({ title, badge, children }) {
+  return (
+    <div className="bg-slate-900 border border-slate-800 rounded-xl p-5 flex flex-col gap-3">
+      <div className="flex justify-between items-center">
+        <h3 className="font-bold text-white text-sm">{title}</h3>
+        {badge && (
+          <span className="text-[10px] bg-cyan-500/15 text-cyan-300 px-2 py-0.5 rounded font-semibold flex items-center gap-1.5">
+            <span className="w-1.5 h-1.5 rounded-full bg-cyan-400 animate-pulse inline-block"></span>
+            {badge}
+          </span>
+        )}
+      </div>
+      {children}
+    </div>
+  );
+}
+
+// Latest samples table for new 15-field format
+function LatestSamplesTable({ data }) {
+  const rows = [...data].reverse().slice(0, 10);
+  const statusCls = (s) =>
+    s === 'ACTIVITY_DETECTED' ? 'bg-red-500/20 text-red-400'
+    : s === 'MONITORING'      ? 'bg-cyan-500/15 text-cyan-300'
+    :                           'bg-slate-700/60 text-slate-400';
+  return (
+    <div className="overflow-x-auto rounded-lg border border-slate-800">
+      <table className="w-full text-left">
+        <thead className="bg-slate-950 text-[10px] text-slate-500 uppercase tracking-widest sticky top-0">
+          <tr>
+            <th className="py-2 px-3 font-semibold">TIME ms</th>
+            <th className="py-2 px-3 font-semibold">A1 Mag</th>
+            <th className="py-2 px-3 font-semibold">A2 Mag</th>
+            <th className="py-2 px-3 font-semibold">SW1</th>
+            <th className="py-2 px-3 font-semibold">SW2</th>
+            <th className="py-2 px-3 font-semibold">CH1 Active</th>
+            <th className="py-2 px-3 font-semibold">CH2 Active</th>
+            <th className="py-2 px-3 font-semibold">CH1 Status</th>
+            <th className="py-2 px-3 font-semibold">CH2 Status</th>
+          </tr>
+        </thead>
+        <tbody>
+          {rows.length === 0 ? (
+            <tr>
+              <td colSpan={9} className="py-8 text-center text-slate-500 text-[11px]">
+                No data yet — connect ESP32 to start streaming.
+              </td>
+            </tr>
+          ) : rows.map(r => (
+            <tr key={r.id} className="border-t border-slate-800/60 hover:bg-slate-800/40 transition-colors">
+              <td className="py-1.5 px-3 font-mono text-[11px] text-slate-500">{r.timeMs}</td>
+              <td className="py-1.5 px-3 font-mono text-[11px] text-cyan-300">{r.a1mag.toFixed(3)}</td>
+              <td className="py-1.5 px-3 font-mono text-[11px] text-purple-300">{r.a2mag.toFixed(3)}</td>
+              <td className={`py-1.5 px-3 text-[11px] font-semibold ${r.sw1 ? 'text-orange-400' : 'text-slate-600'}`}>{r.sw1}</td>
+              <td className={`py-1.5 px-3 text-[11px] font-semibold ${r.sw2 ? 'text-orange-400' : 'text-slate-600'}`}>{r.sw2}</td>
+              <td className={`py-1.5 px-3 text-[11px] font-bold ${r.ch1Active ? 'text-cyan-400' : 'text-slate-600'}`}>{r.ch1Active ? 'ON' : 'OFF'}</td>
+              <td className={`py-1.5 px-3 text-[11px] font-bold ${r.ch2Active ? 'text-purple-400' : 'text-slate-600'}`}>{r.ch2Active ? 'ON' : 'OFF'}</td>
+              <td className="py-1.5 px-3"><span className={`px-2 py-0.5 rounded text-[10px] font-bold ${statusCls(r.ch1Status)}`}>{r.ch1Status}</span></td>
+              <td className="py-1.5 px-3"><span className={`px-2 py-0.5 rounded text-[10px] font-bold ${statusCls(r.ch2Status)}`}>{r.ch2Status}</span></td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+// ── Main Live Monitor Page (Wake-based v2) ─────────────
+function LiveMonitor() {
+  const [connStatus,  setConnStatus]  = useState('Disconnected');
+  const [errorMsg,    setErrorMsg]    = useState('');
+  const [sensorData,  setSensorData]  = useState([]);
+  const [sampleCount, setSampleCount] = useState(0);
+  const [lastTime,    setLastTime]    = useState(null);
+
+  const portRef         = useRef(null);
+  const readerRef       = useRef(null);
+  const streamClosedRef = useRef(null);
+  const abortRef        = useRef(false);
+  const idCounterRef    = useRef(0);
+
+  const latest      = sensorData[sensorData.length - 1] || null;
+  const isConnected = connStatus === 'Connected';
+
+  // Parse new 15-field CSV: TIME,A1_X,A1_Y,A1_Z,A1_MAG,A2_X,A2_Y,A2_Z,A2_MAG,SW1,SW2,CH1_ACTIVE,CH2_ACTIVE,CH1_STATUS,CH2_STATUS
+  function parseLine(line) {
+    const trimmed = line.trim();
+    if (!trimmed) return null;
+    const parts = trimmed.split(',');
+    if (parts.length !== 15) return null;
+    // First 13 fields must be numeric
+    const nums = parts.slice(0, 13).map(Number);
+    if (nums.some(isNaN)) return null; // drops header row and any startup log
+    const [timeMs, a1x, a1y, a1z, a1mag, a2x, a2y, a2z, a2mag, sw1, sw2, ch1Active, ch2Active] = nums;
+    const ch1Status = parts[13].trim().toUpperCase();
+    const ch2Status = parts[14].trim().toUpperCase();
+    // Validate status tokens
+    const validStatuses = ['SLEEP', 'MONITORING', 'ACTIVITY_DETECTED'];
+    if (!validStatuses.includes(ch1Status) || !validStatuses.includes(ch2Status)) return null;
+    const now = new Date();
+    return {
+      id: ++idCounterRef.current,
+      timeMs,
+      timeLabel: now.toLocaleTimeString(),
+      a1x, a1y, a1z, a1mag,
+      a2x, a2y, a2z, a2mag,
+      sw1, sw2,
+      ch1Active, ch2Active,
+      ch1Status, ch2Status,
+    };
+  }
+
+  async function connect() {
+    if (!('serial' in navigator)) {
+      setConnStatus('Error');
+      setErrorMsg('Web Serial API is not supported. Please use Chrome or Edge.');
+      return;
+    }
+    try {
+      setConnStatus('Connecting');
+      setErrorMsg('');
+      const port = await navigator.serial.requestPort();
+      portRef.current = port;
+      await port.open({ baudRate: 115200 });
+      setConnStatus('Connected');
+      abortRef.current = false;
+
+      const textDecoder = new TextDecoderStream();
+      streamClosedRef.current = port.readable.pipeTo(textDecoder.writable);
+      const reader = textDecoder.readable.getReader();
+      readerRef.current = reader;
+
+      let buffer = '';
+      while (!abortRef.current) {
+        const { value, done } = await reader.read();
+        if (done || abortRef.current) break;
+        buffer += value;
+        const lines = buffer.split('\n');
+        buffer = lines.pop();
+        for (const line of lines) {
+          try {
+            const parsed = parseLine(line);
+            if (!parsed) continue;
+            setSensorData(prev => {
+              const next = [...prev, parsed];
+              return next.length > 200 ? next.slice(next.length - 200) : next;
+            });
+            setSampleCount(c => c + 1);
+            setLastTime(parsed.timeLabel);
+          } catch (_) {}
+        }
+      }
+    } catch (err) {
+      if (err.name === 'NotFoundError') {
+        setConnStatus('Disconnected');
+      } else if (err.message && err.message.toLowerCase().includes('busy')) {
+        setConnStatus('Error');
+        setErrorMsg('Close Arduino Serial Monitor and try again.');
+      } else {
+        setConnStatus('Error');
+        setErrorMsg(`Connection failed: ${err.message}`);
+      }
+    }
+  }
+
+  async function disconnect() {
+    abortRef.current = true;
+    try { if (readerRef.current) await readerRef.current.cancel(); } catch (_) {}
+    readerRef.current = null;
+    try { if (streamClosedRef.current) await streamClosedRef.current; } catch (_) {}
+    streamClosedRef.current = null;
+    try { if (portRef.current) await portRef.current.close(); } catch (_) {}
+    portRef.current = null;
+    setConnStatus('Disconnected');
+  }
+
+  useEffect(() => () => { abortRef.current = true; }, []);
+
+  const { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer, ReferenceArea } = Recharts;
+  const chartData = sensorData.slice(-100);
+
+  // Tooltip styling shared
+  const ttStyle = { background:'#0f172a', border:'1px solid #1e293b', borderRadius:'8px', fontSize:'11px', color:'#94a3b8' };
+
+  return (
+    <div className="flex flex-col gap-5">
+
+      {/* ── Connection Panel ── */}
+      <section className="bg-slate-900 border border-slate-800 rounded-xl p-5">
+        <div className="flex flex-wrap items-center justify-between gap-4">
+          <div className="flex items-center gap-4">
+            <div className="bg-cyan-600/15 p-3 rounded-xl border border-cyan-600/20">
+              <i className="fa-solid fa-usb text-cyan-400 text-xl"></i>
+            </div>
+            <div>
+              <h2 className="font-bold text-white text-base flex flex-wrap items-center gap-2">
+                HydroSense Live Monitor
+                <span className="text-[10px] bg-blue-500/15 text-blue-300 px-2 py-0.5 rounded font-semibold">USB Serial</span>
+                <span className="text-[10px] bg-purple-500/15 text-purple-300 px-2 py-0.5 rounded font-semibold">115200 baud</span>
+                <span className="text-[10px] bg-slate-700 text-slate-300 px-2 py-0.5 rounded font-semibold">Building M</span>
+                <span className="text-[10px] bg-slate-700 text-slate-300 px-2 py-0.5 rounded font-semibold">Building C</span>
+              </h2>
+              <p className="text-[11px] text-slate-400 mt-0.5">
+                2 × ADXL345 Accelerometers + 2 × SW-420 Wake Sensors · Wake-triggered 10 s monitoring windows
+              </p>
+            </div>
+          </div>
+          <div className="flex items-center gap-3 flex-wrap">
+            <StatusBadge status={connStatus} />
+            {lastTime && <span className="text-[11px] text-slate-500 font-mono">Last: {lastTime}</span>}
+            {sampleCount > 0 && (
+              <span className="text-[11px] text-slate-500">
+                Samples: <span className="text-white font-mono">{sampleCount}</span>
+              </span>
+            )}
+            {!isConnected ? (
+              <button onClick={connect} disabled={connStatus === 'Connecting'}
+                className="flex items-center gap-2 px-5 py-2 bg-cyan-600 hover:bg-cyan-500 disabled:opacity-50 disabled:cursor-not-allowed text-white text-sm font-semibold rounded-lg transition-colors shadow-lg shadow-cyan-600/20">
+                <i className="fa-solid fa-plug"></i>
+                {connStatus === 'Connecting' ? 'Connecting…' : 'Connect ESP32'}
+              </button>
+            ) : (
+              <button onClick={disconnect}
+                className="flex items-center gap-2 px-4 py-2 bg-red-600 hover:bg-red-500 text-white text-sm font-semibold rounded-lg transition-colors">
+                <i className="fa-solid fa-plug-circle-xmark"></i> Disconnect
+              </button>
+            )}
+          </div>
+        </div>
+
+        <div className="mt-3 flex items-start gap-2 bg-amber-500/10 border border-amber-500/20 rounded-lg px-3 py-2.5 text-[11px] text-amber-300/90">
+          <i className="fa-solid fa-triangle-exclamation text-amber-400 mt-0.5 shrink-0"></i>
+          <span>Close Arduino Serial Monitor before connecting. Web Serial works best in Chrome or Edge.</span>
+        </div>
+
+        {connStatus === 'Error' && errorMsg && (
+          <div className="mt-2 flex items-center gap-2 bg-red-500/10 border border-red-500/30 rounded-lg px-3 py-2 text-[11px] text-red-300">
+            <i className="fa-solid fa-circle-xmark text-red-400 shrink-0"></i>
+            {errorMsg}
+          </div>
+        )}
+        {!('serial' in navigator) && (
+          <div className="mt-2 flex items-center gap-2 bg-red-500/10 border border-red-500/30 rounded-lg px-3 py-2 text-[11px] text-red-300">
+            <i className="fa-solid fa-circle-xmark text-red-400 shrink-0"></i>
+            Web Serial API is not supported in this browser. Please use Chrome or Edge.
+          </div>
+        )}
+      </section>
+
+      {/* ── Location Cards: Building M + Building C ── */}
+      <section>
+        <h2 className="text-sm font-bold text-white mb-3 flex items-center gap-2">
+          <i className="fa-solid fa-location-dot text-cyan-400"></i>
+          Sensor Locations
+          {isConnected && (
+            <span className="text-[10px] bg-green-500/20 text-green-400 border border-green-500/30 px-2 py-0.5 rounded-full flex items-center gap-1.5">
+              <span className="w-1.5 h-1.5 rounded-full bg-green-400 animate-pulse inline-block"></span>
+              Live
+            </span>
+          )}
+        </h2>
+        <div className="grid grid-cols-2 gap-4">
+          <LocationCard
+            chNum={1}
+            building="Building M"
+            location="Main water supply line · ADXL345 #1"
+            status={latest ? latest.ch1Status : 'SLEEP'}
+            active={latest ? !!latest.ch1Active : false}
+            sw={latest ? latest.sw1 : 0}
+            mag={latest ? latest.a1mag : null}
+            x={latest ? latest.a1x : null}
+            y={latest ? latest.a1y : null}
+            z={latest ? latest.a1z : null}
+            lastTime={lastTime}
+          />
+          <LocationCard
+            chNum={2}
+            building="Building C"
+            location="Secondary distribution line · ADXL345 #2"
+            status={latest ? latest.ch2Status : 'SLEEP'}
+            active={latest ? !!latest.ch2Active : false}
+            sw={latest ? latest.sw2 : 0}
+            mag={latest ? latest.a2mag : null}
+            x={latest ? latest.a2x : null}
+            y={latest ? latest.a2y : null}
+            z={latest ? latest.a2z : null}
+            lastTime={lastTime}
+          />
+        </div>
+      </section>
+
+      {/* ── Live Charts 2×2 ── */}
+      <div className="grid grid-cols-2 gap-4">
+
+        {/* Magnitude: both locations over time */}
+        <LiveChartCard title="Pipe Vibration Magnitude" badge="Live">
+          <div className="h-52">
+            <ResponsiveContainer width="100%" height="100%">
+              <LineChart data={chartData} margin={{ top:4, right:8, left:-15, bottom:0 }}>
+                <CartesianGrid strokeDasharray="3 3" stroke="#1e293b" />
+                <XAxis dataKey="timeLabel" tick={{ fill:'#475569', fontSize:9 }} interval="preserveStartEnd" />
+                <YAxis tick={{ fill:'#475569', fontSize:9 }} domain={['auto','auto']} />
+                <Tooltip contentStyle={ttStyle} />
+                <Legend wrapperStyle={{ fontSize:'11px', paddingTop:'4px' }} />
+                <Line type="monotone" dataKey="a1mag" name="Building M (g)" stroke="#22d3ee" strokeWidth={1.5} dot={false} isAnimationActive={false} />
+                <Line type="monotone" dataKey="a2mag" name="Building C (g)" stroke="#a855f7" strokeWidth={1.5} dot={false} isAnimationActive={false} />
+              </LineChart>
+            </ResponsiveContainer>
+          </div>
+        </LiveChartCard>
+
+        {/* SW wake triggers + active windows */}
+        <LiveChartCard title="SW-420 Wake Triggers &amp; Detection Windows" badge="Live">
+          <div className="h-52">
+            <ResponsiveContainer width="100%" height="100%">
+              <LineChart data={chartData} margin={{ top:4, right:8, left:-15, bottom:0 }}>
+                <CartesianGrid strokeDasharray="3 3" stroke="#1e293b" />
+                <XAxis dataKey="timeLabel" tick={{ fill:'#475569', fontSize:9 }} interval="preserveStartEnd" />
+                <YAxis tick={{ fill:'#475569', fontSize:9 }} domain={[0, 1]} ticks={[0, 1]} />
+                <Tooltip contentStyle={ttStyle} />
+                <Legend wrapperStyle={{ fontSize:'11px', paddingTop:'4px' }} />
+                <Line type="stepAfter" dataKey="sw1"       name="SW1 Wake"        stroke="#f97316" strokeWidth={2}   dot={false} isAnimationActive={false} />
+                <Line type="stepAfter" dataKey="sw2"       name="SW2 Wake"        stroke="#fb923c" strokeWidth={2}   dot={false} isAnimationActive={false} strokeDasharray="5 3" />
+                <Line type="stepAfter" dataKey="ch1Active" name="CH1 Window"      stroke="#22d3ee" strokeWidth={1.5} dot={false} isAnimationActive={false} strokeDasharray="4 2" />
+                <Line type="stepAfter" dataKey="ch2Active" name="CH2 Window"      stroke="#a855f7" strokeWidth={1.5} dot={false} isAnimationActive={false} strokeDasharray="4 2" />
+              </LineChart>
+            </ResponsiveContainer>
+          </div>
+        </LiveChartCard>
+
+        {/* Building M — X/Y/Z axes */}
+        <LiveChartCard title="Building M — ADXL345 Axes" badge="CH1">
+          <div className="h-52">
+            <ResponsiveContainer width="100%" height="100%">
+              <LineChart data={chartData} margin={{ top:4, right:8, left:-15, bottom:0 }}>
+                <CartesianGrid strokeDasharray="3 3" stroke="#1e293b" />
+                <XAxis dataKey="timeLabel" tick={{ fill:'#475569', fontSize:9 }} interval="preserveStartEnd" />
+                <YAxis tick={{ fill:'#475569', fontSize:9 }} domain={['auto','auto']} />
+                <Tooltip contentStyle={ttStyle} />
+                <Legend wrapperStyle={{ fontSize:'11px', paddingTop:'4px' }} />
+                <Line type="monotone" dataKey="a1x" name="X (g)" stroke="#f87171" strokeWidth={1.5} dot={false} isAnimationActive={false} />
+                <Line type="monotone" dataKey="a1y" name="Y (g)" stroke="#4ade80" strokeWidth={1.5} dot={false} isAnimationActive={false} />
+                <Line type="monotone" dataKey="a1z" name="Z (g)" stroke="#60a5fa" strokeWidth={1.5} dot={false} isAnimationActive={false} />
+              </LineChart>
+            </ResponsiveContainer>
+          </div>
+        </LiveChartCard>
+
+        {/* Building C — X/Y/Z axes */}
+        <LiveChartCard title="Building C — ADXL345 Axes" badge="CH2">
+          <div className="h-52">
+            <ResponsiveContainer width="100%" height="100%">
+              <LineChart data={chartData} margin={{ top:4, right:8, left:-15, bottom:0 }}>
+                <CartesianGrid strokeDasharray="3 3" stroke="#1e293b" />
+                <XAxis dataKey="timeLabel" tick={{ fill:'#475569', fontSize:9 }} interval="preserveStartEnd" />
+                <YAxis tick={{ fill:'#475569', fontSize:9 }} domain={['auto','auto']} />
+                <Tooltip contentStyle={ttStyle} />
+                <Legend wrapperStyle={{ fontSize:'11px', paddingTop:'4px' }} />
+                <Line type="monotone" dataKey="a2x" name="X (g)" stroke="#f87171" strokeWidth={1.5} dot={false} isAnimationActive={false} />
+                <Line type="monotone" dataKey="a2y" name="Y (g)" stroke="#4ade80" strokeWidth={1.5} dot={false} isAnimationActive={false} />
+                <Line type="monotone" dataKey="a2z" name="Z (g)" stroke="#60a5fa" strokeWidth={1.5} dot={false} isAnimationActive={false} />
+              </LineChart>
+            </ResponsiveContainer>
+          </div>
+        </LiveChartCard>
+
+      </div>
+
+      {/* ── Latest Samples Table ── */}
+      <section className="bg-slate-900 border border-slate-800 rounded-xl p-5 flex flex-col gap-3">
+        <h3 className="font-bold text-white text-sm flex items-center gap-2">
+          <i className="fa-solid fa-table text-slate-400"></i>
+          Latest Samples
+          <span className="text-[10px] text-slate-500 font-normal ml-1">· last 10 rows</span>
+        </h3>
+        <LatestSamplesTable data={sensorData} />
+      </section>
+
+    </div>
+  );
+}
+
+// ── Risk & Analysis Page ───────────────────────────────
+function AnalysisPage() {
+  const [status,  setStatus]  = useState(null);
+  const [zones,   setZones]   = useState({});
+  const [alerts,  setAlerts]  = useState([]);
+  const [history, setHistory] = useState([]);
+
+  async function fetchAll() {
+    try {
+      const [s, z, a, h] = await Promise.all([
+        fetch('/api/status').then(r => r.json()),
+        fetch('/api/zones').then(r => r.json()),
+        fetch('/api/alerts?limit=50').then(r => r.json()),
+        fetch('/api/signal-history').then(r => r.json()),
+      ]);
+      setStatus(s);
+      setZones(z);
+      setAlerts(a.alerts || []);
+      setHistory((h.history || []).slice(-60));
+    } catch (_) {}
+  }
+
+  useEffect(() => { fetchAll(); }, []);
+  useInterval(fetchAll, 3000);
+
+  const { BarChart, Bar, LineChart, Line, XAxis, YAxis, CartesianGrid,
+          Tooltip, ResponsiveContainer, Cell, Legend } = Recharts;
+
+  // ── risk score 0–100 per zone ─────────────────────────
+  function riskScore(z) {
+    const leakFrac = (z.sensors_total || 0) > 0 ? z.sensors_leaking / z.sensors_total : 0;
+    const base = leakFrac * 70;
+    const bonus = z.status === 'leak' ? 20 : z.status === 'warning' ? 10 : 0;
+    return Math.min(100, Math.round(base + bonus));
+  }
+
+  function riskColor(r) {
+    return r >= 60 ? '#ef4444' : r >= 25 ? '#f97316' : '#22c55e';
+  }
+
+  function riskLabel(r) {
+    return r >= 60 ? 'HIGH' : r >= 25 ? 'MEDIUM' : 'LOW';
+  }
+
+  const zoneList = Object.entries(zones).map(([id, z]) => ({
+    id, ...z, risk: riskScore(z),
+  }));
+
+  function zoneBadgeCls(s) {
+    if (s === 'leak')    return 'bg-red-500/15 text-red-400 border border-red-500/30';
+    if (s === 'warning') return 'bg-yellow-500/15 text-yellow-300 border border-yellow-500/30';
+    return 'bg-green-500/15 text-green-400 border border-green-500/30';
+  }
+  function zoneStatusIcon(s) {
+    if (s === 'leak')    return 'fa-triangle-exclamation';
+    if (s === 'warning') return 'fa-circle-exclamation';
+    return 'fa-circle-check';
+  }
+
+  const activeAlerts  = alerts.filter(a => a.status === 'active');
+  const resolvedCount = alerts.filter(a => a.status === 'resolved').length;
+
+  const sevCls = { CRITICAL:'bg-red-500/20 text-red-400', HIGH:'bg-orange-500/20 text-orange-400', MEDIUM:'bg-yellow-500/20 text-yellow-400', LOW:'bg-slate-700/60 text-slate-400' };
+
+  const statCards = status ? [
+    { label:'Online Sensors',     value: status.sensors_online,
+      icon:'fa-tower-broadcast',  color:'text-green-400',   bg:'bg-green-500/10  border-green-500/20'  },
+    { label:'Leaks Detected',     value: status.sensors_leaking,
+      icon:'fa-droplet',          color:'text-red-400',     bg:'bg-red-500/10    border-red-500/20'    },
+    { label:'No-Leak Confirmed',  value: Math.max(0, (status.sensors_online || 0) - (status.sensors_leaking || 0)),
+      icon:'fa-shield-check',     color:'text-emerald-400', bg:'bg-emerald-500/10 border-emerald-500/20'},
+    { label:'Offline Sensors',    value: status.sensors_offline,
+      icon:'fa-circle-xmark',     color:'text-slate-400',   bg:'bg-slate-800     border-slate-700'     },
+    { label:'Active Alerts',      value: status.active_alerts,
+      icon:'fa-bell',             color:'text-yellow-400',  bg:'bg-yellow-500/10 border-yellow-500/20' },
+    { label:'Critical / High',    value: `${status.critical_alerts ?? 0} / ${status.high_alerts ?? 0}`,
+      icon:'fa-siren-on',         color:'text-orange-400',  bg:'bg-orange-500/10 border-orange-500/20' },
+  ] : [];
+
+  const ttStyle = { background:'#0f172a', border:'1px solid #1e293b', borderRadius:'8px', fontSize:'11px', color:'#94a3b8' };
+
+  return (
+    <div className="flex flex-col gap-5">
+
+      {/* ── Detection Summary ── */}
+      <section>
+        <h2 className="text-sm font-bold text-white mb-3 flex items-center gap-2">
+          <i className="fa-solid fa-chart-pie text-indigo-400"></i> Detection Summary
+          <span className="text-[10px] text-slate-500 font-normal">· live — refreshes every 3 s</span>
+          {!status && <span className="text-[10px] text-slate-500 animate-pulse">Loading…</span>}
+        </h2>
+        <div className="grid grid-cols-6 gap-3">
+          {statCards.map((c, i) => (
+            <div key={i} className={`border rounded-xl p-4 flex flex-col gap-2 ${c.bg}`}>
+              <div className="flex justify-between items-start">
+                <i className={`fa-solid ${c.icon} ${c.color} text-sm`}></i>
+                <span className="text-2xl font-extrabold text-white">{c.value ?? '—'}</span>
+              </div>
+              <p className="text-[11px] font-medium text-slate-400 leading-tight">{c.label}</p>
+            </div>
+          ))}
+        </div>
+      </section>
+
+      {/* ── Confidence History + Zone Risk Chart ── */}
+      <div className="grid grid-cols-2 gap-4">
+        {/* Peak confidence over time */}
+        <div className="bg-slate-900 border border-slate-800 rounded-xl p-5 flex flex-col gap-3">
+          <h3 className="text-sm font-bold text-white flex items-center gap-2">
+            <i className="fa-solid fa-chart-line text-cyan-400"></i> Peak Confidence Over Time
+            <span className="text-[10px] bg-cyan-500/15 text-cyan-300 px-2 py-0.5 rounded font-semibold flex items-center gap-1.5">
+              <span className="w-1.5 h-1.5 rounded-full bg-cyan-400 animate-pulse inline-block"></span>Live
+            </span>
+          </h3>
+          <div style={{ height:'200px' }}>
+            <ResponsiveContainer width="100%" height="100%">
+              <LineChart data={history} margin={{ top:4, right:8, left:-15, bottom:0 }}>
+                <CartesianGrid strokeDasharray="3 3" stroke="#1e293b" />
+                <XAxis dataKey="t" tickFormatter={v => new Date(v).toLocaleTimeString()} tick={{ fill:'#475569', fontSize:9 }} interval="preserveStartEnd" />
+                <YAxis domain={[0, 1]} tickFormatter={v => `${(v*100).toFixed(0)}%`} tick={{ fill:'#475569', fontSize:9 }} />
+                <Tooltip contentStyle={ttStyle} formatter={(v) => [`${(v*100).toFixed(1)}%`, 'Confidence']} labelFormatter={l => new Date(l).toLocaleTimeString()} />
+                <Line type="monotone" dataKey="conf" name="Peak Confidence" stroke="#22d3ee" strokeWidth={2} dot={false} isAnimationActive={false} />
+              </LineChart>
+            </ResponsiveContainer>
+          </div>
+        </div>
+
+        {/* Zone risk bar chart */}
+        <div className="bg-slate-900 border border-slate-800 rounded-xl p-5 flex flex-col gap-3">
+          <h3 className="text-sm font-bold text-white flex items-center gap-2">
+            <i className="fa-solid fa-chart-bar text-orange-400"></i> Risk Score by Zone
+          </h3>
+          <div style={{ height:'200px' }}>
+            <ResponsiveContainer width="100%" height="100%">
+              <BarChart data={zoneList} layout="vertical" margin={{ top:4, right:16, left:4, bottom:4 }}>
+                <CartesianGrid strokeDasharray="3 3" stroke="#1e293b" horizontal={false} />
+                <XAxis type="number" domain={[0, 100]} tickFormatter={v => `${v}%`} tick={{ fill:'#475569', fontSize:9 }} />
+                <YAxis type="category" dataKey="id" tick={{ fill:'#94a3b8', fontSize:10 }} width={28} />
+                <Tooltip contentStyle={ttStyle} formatter={(v, n, p) => [`${v}%`, 'Risk Score']} labelFormatter={l => zones[l]?.name || l} />
+                <Bar dataKey="risk" radius={[0,4,4,0]} maxBarSize={18}>
+                  {zoneList.map((z, i) => <Cell key={i} fill={riskColor(z.risk)} />)}
+                </Bar>
+              </BarChart>
+            </ResponsiveContainer>
+          </div>
+        </div>
+      </div>
+
+      {/* ── Zone Status Grid ── */}
+      <section>
+        <h2 className="text-sm font-bold text-white mb-3 flex items-center gap-2">
+          <i className="fa-solid fa-map-location-dot text-cyan-400"></i> Zone Status
+        </h2>
+        <div className="grid grid-cols-3 gap-3">
+          {zoneList.map(z => (
+            <div key={z.id} className={`bg-slate-900 rounded-xl border p-4 transition-all duration-300 ${
+              z.status === 'leak' ? 'border-red-500/40 shadow-red-500/10 shadow-lg'
+              : z.status === 'warning' ? 'border-yellow-500/30' : 'border-slate-800'}`}>
+              <div className="flex justify-between items-start mb-3">
+                <div>
+                  <p className="text-[10px] uppercase tracking-widest text-slate-500 font-semibold">{z.id} · Jordan</p>
+                  <h3 className="font-bold text-white text-[13px] leading-tight">{z.name}</h3>
+                  <p className="text-[10px] text-slate-500 mt-0.5">{(z.pipes || []).join('  ·  ')}</p>
+                </div>
+                <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded text-[10px] font-bold ${zoneBadgeCls(z.status)}`}>
+                  <i className={`fa-solid ${zoneStatusIcon(z.status)} text-[9px]`}></i>
+                  {z.status === 'leak' ? 'LEAK' : z.status === 'warning' ? 'WARNING' : 'NORMAL'}
+                </span>
+              </div>
+              <div className="grid grid-cols-3 gap-2 text-[10px] mb-3">
+                <div className="bg-slate-800/50 rounded-lg p-2 text-center">
+                  <p className="text-slate-500">Total</p>
+                  <p className="text-white font-bold font-mono text-sm">{z.sensors_total}</p>
+                </div>
+                <div className={`rounded-lg p-2 text-center ${z.sensors_leaking > 0 ? 'bg-red-500/10' : 'bg-slate-800/50'}`}>
+                  <p className="text-slate-500">Leaking</p>
+                  <p className={`font-bold font-mono text-sm ${z.sensors_leaking > 0 ? 'text-red-400' : 'text-green-400'}`}>{z.sensors_leaking}</p>
+                </div>
+                <div className="bg-slate-800/50 rounded-lg p-2 text-center">
+                  <p className="text-slate-500">Offline</p>
+                  <p className="text-slate-400 font-bold font-mono text-sm">{z.sensors_offline}</p>
+                </div>
+              </div>
+              {/* Risk bar */}
+              <div>
+                <div className="flex justify-between text-[10px] text-slate-500 mb-1">
+                  <span>Risk Score</span>
+                  <span className="font-bold" style={{ color: riskColor(z.risk) }}>
+                    {riskLabel(z.risk)} · {z.risk}%
+                  </span>
+                </div>
+                <div className="w-full bg-slate-800 rounded-full h-1.5">
+                  <div className="h-1.5 rounded-full transition-all duration-700"
+                       style={{ width: `${z.risk}%`, backgroundColor: riskColor(z.risk) }} />
+                </div>
+              </div>
+            </div>
+          ))}
+        </div>
+      </section>
+
+      {/* ── Active Leak Locations ── */}
+      <section className="bg-slate-900 border border-slate-800 rounded-xl p-5 flex flex-col gap-3">
+        <div className="flex justify-between items-center">
+          <h2 className="text-sm font-bold text-white flex items-center gap-2">
+            <i className="fa-solid fa-location-crosshairs text-red-400"></i> Active Leak Locations
+            {activeAlerts.length > 0 && (
+              <span className="bg-red-500/15 text-red-400 border border-red-500/30 px-2 py-0.5 rounded text-[10px] font-bold animate-pulse">
+                {activeAlerts.length} ACTIVE
+              </span>
+            )}
+            {resolvedCount > 0 && (
+              <span className="bg-green-500/10 text-green-400 border border-green-500/20 px-2 py-0.5 rounded text-[10px] font-semibold">
+                {resolvedCount} resolved
+              </span>
+            )}
+          </h2>
+          <span className="text-[11px] text-slate-500 font-mono">Auto-refreshes every 3 s</span>
+        </div>
+
+        {activeAlerts.length === 0 ? (
+          <div className="flex flex-col items-center justify-center py-10 gap-3">
+            <div className="w-12 h-12 rounded-full bg-green-500/10 border border-green-500/20 flex items-center justify-center">
+              <i className="fa-solid fa-shield-check text-green-400 text-xl"></i>
+            </div>
+            <p className="text-sm font-semibold text-green-400">No Active Leaks Detected</p>
+            <p className="text-[11px] text-slate-500">All monitored pipes are operating within normal parameters.</p>
+          </div>
+        ) : (
+          <div className="overflow-x-auto rounded-lg border border-slate-800">
+            <table className="w-full text-left">
+              <thead className="bg-slate-950 text-[10px] text-slate-500 uppercase tracking-widest sticky top-0">
+                <tr>
+                  <th className="py-2 px-3 font-semibold">Alert ID</th>
+                  <th className="py-2 px-3 font-semibold">Sensor</th>
+                  <th className="py-2 px-3 font-semibold">Zone / Location</th>
+                  <th className="py-2 px-3 font-semibold">Pipe</th>
+                  <th className="py-2 px-3 font-semibold">Material</th>
+                  <th className="py-2 px-3 font-semibold">Depth</th>
+                  <th className="py-2 px-3 font-semibold">AI Confidence</th>
+                  <th className="py-2 px-3 font-semibold">Severity</th>
+                  <th className="py-2 px-3 font-semibold">Flow</th>
+                  <th className="py-2 px-3 font-semibold">Pressure</th>
+                  <th className="py-2 px-3 font-semibold">GPS Coords</th>
+                  <th className="py-2 px-3 font-semibold">Detected</th>
+                </tr>
+              </thead>
+              <tbody>
+                {activeAlerts.map(a => {
+                  const conf = Math.round((a.confidence || 0) * 100);
+                  const confColor = conf >= 90 ? 'text-red-400' : conf >= 75 ? 'text-orange-400' : 'text-yellow-400';
+                  const ts = new Date(a.timestamp);
+                  return (
+                    <tr key={a.id} className="border-t border-slate-800/60 hover:bg-slate-800/30 transition-colors">
+                      <td className="py-2 px-3 font-mono text-[11px] text-cyan-400">{a.id}</td>
+                      <td className="py-2 px-3 font-mono text-[11px] text-slate-300">{a.sensor_id}</td>
+                      <td className="py-2 px-3 text-[11px]">
+                        <span className="text-white font-semibold">{a.zone_name}</span>
+                        <span className="block text-slate-500 text-[10px]">{a.zone}</span>
+                      </td>
+                      <td className="py-2 px-3 font-mono text-[11px] text-slate-300">{a.pipe}</td>
+                      <td className="py-2 px-3 text-[11px] text-slate-400">{a.material}</td>
+                      <td className="py-2 px-3 font-mono text-[11px] text-slate-300">{a.depth_m} m</td>
+                      <td className={`py-2 px-3 font-mono text-[13px] font-extrabold ${confColor}`}>{conf}%</td>
+                      <td className="py-2 px-3">
+                        <span className={`px-2 py-0.5 rounded text-[10px] font-bold ${sevCls[a.severity] || sevCls.LOW}`}>{a.severity}</span>
+                      </td>
+                      <td className="py-2 px-3 font-mono text-[11px] text-slate-300">{a.flow_lps} L/s</td>
+                      <td className="py-2 px-3 font-mono text-[11px] text-slate-300">{a.pressure_bar} bar</td>
+                      <td className="py-2 px-3 font-mono text-[10px] text-slate-500">
+                        {a.lat?.toFixed(4)}°N<br/>{a.lon?.toFixed(4)}°E
+                      </td>
+                      <td className="py-2 px-3 text-[10px] text-slate-500 font-mono">{ts.toLocaleTimeString()}</td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </section>
+
+      {/* ── ML Pipeline & Model Info ── */}
+      <section className="bg-slate-900 border border-slate-800 rounded-xl p-5">
+        <h2 className="text-sm font-bold text-white mb-4 flex items-center gap-2">
+          <i className="fa-solid fa-brain text-indigo-400"></i> Signal Processing Pipeline & ML Model
+        </h2>
+        <div className="grid grid-cols-2 gap-8">
+
+          {/* DSP pipeline steps */}
+          <div>
+            <p className="text-[11px] font-semibold text-slate-400 mb-3 uppercase tracking-wider">DSP Pipeline — Accelerometer</p>
+            <div className="flex flex-col gap-0">
+              {[
+                { step:'1', label:'Load Signal',      desc:'PCB 333B50 CSV → Value [m/s²] · cap at 240 000 samples', icon:'fa-file-csv',    color:'text-slate-300'   },
+                { step:'2', label:'Detrend',           desc:'scipy.signal.detrend — removes DC offset & linear trend', icon:'fa-sliders',     color:'text-blue-400'    },
+                { step:'3', label:'Bandpass Filter',   desc:'4th-order Butterworth · 10–5 000 Hz · filtfilt',         icon:'fa-wave-square', color:'text-cyan-400'    },
+                { step:'4', label:'Hann-windowed FFT', desc:'1-second windows, 50% overlap → magnitude spectrum',     icon:'fa-chart-area',  color:'text-purple-400'  },
+                { step:'5', label:'Feature Extraction',desc:'20 features: time-domain + frequency + band energy',     icon:'fa-microchip',   color:'text-green-400'   },
+                { step:'6', label:'Classify',          desc:'ExtraTreesClassifier → Leak (1) or No-Leak (0)',         icon:'fa-circle-nodes','color':'text-indigo-400' },
+              ].map((s, i, arr) => (
+                <div key={s.step} className="flex items-start gap-3">
+                  <div className="flex flex-col items-center shrink-0">
+                    <div className="w-7 h-7 rounded-full bg-slate-800 border border-slate-700 flex items-center justify-center text-[11px] font-bold text-slate-300 shrink-0">{s.step}</div>
+                    {i < arr.length - 1 && <div className="w-px bg-slate-800" style={{ height:'20px' }}></div>}
+                  </div>
+                  <div className="pb-3">
+                    <p className={`text-[12px] font-semibold ${s.color} flex items-center gap-1.5`}>
+                      <i className={`fa-solid ${s.icon} text-[10px]`}></i>{s.label}
+                    </p>
+                    <p className="text-[10px] text-slate-500 leading-relaxed">{s.desc}</p>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+
+          {/* Model metrics */}
+          <div>
+            <p className="text-[11px] font-semibold text-slate-400 mb-3 uppercase tracking-wider">Model Metrics — Held-out Test Set</p>
+            <div className="flex flex-col gap-2">
+              {[
+                { label:'Model',                 value:'ExtraTreesClassifier',    color:'text-indigo-300' },
+                { label:'Estimators',            value:'600 trees',               color:'text-slate-300'  },
+                { label:'Features',              value:'20 (time + freq + bands)', color:'text-slate-300'  },
+                { label:'Train / Test Split',    value:'File-level · 80 / 20',    color:'text-cyan-300'   },
+                { label:'Test Accuracy',         value:'80.51 %',                 color:'text-green-400'  },
+                { label:'Leak Recall',           value:'94 %',                    color:'text-green-400'  },
+                { label:'No-Leak Precision',     value:'85 %',                    color:'text-green-400'  },
+                { label:'Weighted F1',           value:'79.58 %',                 color:'text-yellow-400' },
+                { label:'ROC-AUC',               value:'80.27 %',                 color:'text-blue-400'   },
+                { label:'Average Precision',     value:'81.85 %',                 color:'text-blue-400'   },
+                { label:'Top Feature',           value:'zero_cross',              color:'text-purple-300' },
+                { label:'#2 Feature',            value:'band_low_rms',            color:'text-purple-300' },
+                { label:'#3 Feature',            value:'band_low',               color:'text-purple-300' },
+                { label:'Sensor Type',           value:'PCB 333B50 · 25.6 kHz',  color:'text-slate-400'  },
+              ].map(r => (
+                <div key={r.label} className="flex justify-between text-[11px] border-b border-slate-800/50 pb-1.5">
+                  <span className="text-slate-500">{r.label}</span>
+                  <span className={`font-semibold font-mono ${r.color}`}>{r.value}</span>
+                </div>
+              ))}
+            </div>
+
+            {/* Feature importance mini-bars */}
+            <div className="mt-4">
+              <p className="text-[10px] font-semibold text-slate-500 uppercase tracking-wider mb-2">Feature Importance (Top 5)</p>
+              {[
+                { name:'zero_cross',    pct:10.2 },
+                { name:'band_low_rms',  pct: 7.5 },
+                { name:'band_low',      pct: 7.4 },
+                { name:'spec_rolloff',  pct: 6.5 },
+                { name:'spec_centroid', pct: 6.4 },
+              ].map(f => (
+                <div key={f.name} className="mb-1.5">
+                  <div className="flex justify-between text-[10px] text-slate-500 mb-0.5">
+                    <span className="font-mono">{f.name}</span>
+                    <span>{f.pct}%</span>
+                  </div>
+                  <div className="w-full bg-slate-800 rounded-full h-1">
+                    <div className="h-1 rounded-full bg-indigo-500 transition-all duration-700" style={{ width:`${f.pct * 5}%` }} />
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+        </div>
+      </section>
+
+    </div>
+  );
+}
+
 // ── MAIN APP ───────────────────────────────────────────
 function App() {
   const [activeId, setActiveId]     = useState(1);
@@ -272,6 +1174,7 @@ function App() {
   const [logFilter, setLogFilter]   = useState('All');
   const [waveData, setWaveData]     = useState(Array(80).fill(0));
   const phaseRef = useRef(0);
+  const [page, setPage] = useState('dashboard');
 
   const [channels, setChannels] = useState([
     { id:1, pipeLabel:'Pipe Line A', type:'Accelerometer',   status:'Normal',        confidence:96, rms:0.12, history: Array(20).fill(0) },
@@ -404,6 +1307,43 @@ function App() {
         </div>
       </header>
 
+      {/* ── PAGE NAVIGATION TABS ── */}
+      <div className="flex gap-2">
+        <button onClick={() => setPage('dashboard')}
+          className={`flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-semibold transition-colors ${
+            page === 'dashboard'
+              ? 'bg-blue-600 text-white shadow-lg shadow-blue-600/20'
+              : 'bg-slate-900 text-slate-400 hover:bg-slate-800 border border-slate-800'
+          }`}>
+          <i className="fa-solid fa-gauge-high"></i> Dashboard
+        </button>
+        <button onClick={() => setPage('live')}
+          className={`flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-semibold transition-colors ${
+            page === 'live'
+              ? 'bg-cyan-600 text-white shadow-lg shadow-cyan-600/20'
+              : 'bg-slate-900 text-slate-400 hover:bg-slate-800 border border-slate-800'
+          }`}>
+          <i className="fa-solid fa-satellite-dish"></i> Live Monitor
+          {page === 'live' && <span className="w-1.5 h-1.5 rounded-full bg-cyan-400 animate-pulse inline-block"></span>}
+        </button>
+        <button onClick={() => setPage('analysis')}
+          className={`flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-semibold transition-colors ${
+            page === 'analysis'
+              ? 'bg-indigo-600 text-white shadow-lg shadow-indigo-600/20'
+              : 'bg-slate-900 text-slate-400 hover:bg-slate-800 border border-slate-800'
+          }`}>
+          <i className="fa-solid fa-shield-halved"></i> Risk &amp; Analysis
+          {page === 'analysis' && <span className="w-1.5 h-1.5 rounded-full bg-indigo-400 animate-pulse inline-block"></span>}
+        </button>
+      </div>
+
+      {/* ── LIVE MONITOR PAGE ── */}
+      {page === 'live' && <LiveMonitor />}
+
+      {/* ── RISK & ANALYSIS PAGE ── */}
+      {page === 'analysis' && <AnalysisPage />}
+
+      {page === 'dashboard' && <>
       {/* ── OVERVIEW ── */}
       <section className="grid grid-cols-6 gap-3">
         {overviewCards.map((m, i) => (
@@ -532,6 +1472,8 @@ function App() {
           </div>
         </div>
       </div>
+
+      </>}
 
     </div>
   );

@@ -94,9 +94,13 @@
   <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
   <!-- Babel -->
   <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  <!-- prop-types (required by Recharts) -->
+  <script src="https://unpkg.com/prop-types@15.8.1/prop-types.min.js"></script>
+  <!-- Recharts for live sensor charts -->
+  <script src="https://unpkg.com/recharts@2.12.7/umd/Recharts.js"></script>
 </head>
-<body class="h-screen overflow-hidden flex flex-col">
-  <div id="root" class="h-full w-full flex flex-col"></div>
+<body class="min-h-screen overflow-y-auto flex flex-col">
+  <div id="root" class="w-full flex flex-col"></div>
   
   <script type="text/babel" src="/static/app.jsx"></script>
 </body>

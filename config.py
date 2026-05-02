@@ -7,7 +7,8 @@ DATA_DIR = BASE_DIR / "data"
 RAW_DATA_DIR = DATA_DIR / "raw"
 SAMPLED_DATA_DIR = DATA_DIR / "sampled"
 MODELS_DIR = BASE_DIR / "models"
-FEATURES_FILE = DATA_DIR / "features_balanced.csv"
+FEATURES_FILE       = DATA_DIR / "features_balanced.csv"
+ACCEL_FEATURES_FILE = DATA_DIR / "features_accel.csv"
 
 # Hydrophone sampling parameters (PCM_32 RAW files)
 HYDROPHONE_FS = 8000        # Hz — from dataset author's convert.md
@@ -17,7 +18,7 @@ HYDROPHONE_HIGH_CUT = 3800  # Hz  (below Nyquist of 4000 Hz)
 # Accelerometer sampling parameters (CSV files, dt=0.000039 s)
 ACCELEROMETER_FS = 25641    # Hz  (≈ 1/0.000039)
 ACCELEROMETER_LOW_CUT  = 10
-ACCELEROMETER_HIGH_CUT = 5000
+ACCELEROMETER_HIGH_CUT = 1000
 
 # Shared DSP
 FILTER_ORDER = 4

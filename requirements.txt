@@ -5,7 +5,11 @@ pandas
 matplotlib
 pyserial
 fastapi
-uvicorn
+uvicorn[standard]
 joblib
 h5py
 soundfile
+sse-starlette
+jinja2
+aiofiles
+python-multipart
