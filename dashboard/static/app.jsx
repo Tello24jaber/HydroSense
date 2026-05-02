@@ -1165,6 +1165,389 @@ function AnalysisPage() {
   );
 }
 
+// ── AI Inference Page ──────────────────────────────────
+function InferencePage() {
+  const [ports,        setPorts]        = useState([]);
+  const [selPort,      setSelPort]      = useState('COM4');
+  const [serialStatus, setSerialStatus] = useState({
+    connected: false, port: null, error: null, sample_count: 0, last_ts: null,
+  });
+  const [ch1Data, setCh1Data] = useState(null);
+  const [ch2Data, setCh2Data] = useState(null);
+  const esRef = useRef(null);
+
+  // Load available ports on mount
+  useEffect(() => {
+    fetch('/api/serial/ports')
+      .then(r => r.json())
+      .then(d => {
+        const list = d.ports || [];
+        setPorts(list);
+        if (list.length > 0) setSelPort(list[0].port);
+      })
+      .catch(() => {});
+  }, []);
+
+  // Poll serial status every 5 s (drives progress bar only; SSE handles connection/error updates)
+  useInterval(() => {
+    fetch('/api/serial/status')
+      .then(r => r.json())
+      .then(d => setSerialStatus(prev =>
+        // only update if something actually changed to avoid spurious re-renders
+        (prev.sample_count === d.sample_count && prev.connected === d.connected && prev.error === d.error)
+          ? prev
+          : d
+      ))
+      .catch(() => {});
+  }, 5000);
+
+  // Subscribe to inference SSE
+  useEffect(() => {
+    const es = new EventSource('/stream/inference');
+    esRef.current = es;
+    es.addEventListener('inference', (e) => {
+      try {
+        const d = JSON.parse(e.data);
+        if (d.serial) setSerialStatus(prev => ({ ...prev, ...d.serial }));
+        if (d.ch1)    setCh1Data(d.ch1);
+        if (d.ch2)    setCh2Data(d.ch2);
+      } catch (_) {}
+    });
+    es.onerror = () => {};
+    return () => { es.close(); };
+  }, []);
+
+  async function connect() {
+    const r = await fetch(`/api/serial/connect?port=${encodeURIComponent(selPort)}`, { method: 'POST' });
+    const d = await r.json();
+    if (!d.ok) alert(d.message || 'Connection failed');
+  }
+  async function disconnect() {
+    await fetch('/api/serial/disconnect', { method: 'POST' });
+    setCh1Data(null);
+    setCh2Data(null);
+  }
+
+  const isConn = serialStatus.connected;
+  const ttStyle = { background: '#0f172a', border: '1px solid #1e293b', borderRadius: '8px', fontSize: '11px', color: '#94a3b8' };
+
+  function PredictionBadge({ prediction, confidence, p_leak, p_no_leak, model_loaded }) {
+    if (!model_loaded) {
+      return (
+        <div className="flex flex-col items-center justify-center gap-1 py-2">
+          <i className="fa-solid fa-circle-xmark text-slate-600 text-2xl"></i>
+          <p className="text-[10px] text-slate-500 text-center">Model not loaded</p>
+        </div>
+      );
+    }
+    if (prediction === null || prediction === undefined) {
+      return (
+        <div className="flex flex-col items-center justify-center gap-1 py-2">
+          <i className="fa-solid fa-hourglass-half text-slate-600 text-2xl animate-spin"></i>
+          <p className="text-[10px] text-slate-500">Collecting samples…</p>
+        </div>
+      );
+    }
+    const isLeak = prediction === 1;
+    const pct    = Math.round((confidence || 0) * 100);
+    return (
+      <div className={`rounded-xl border p-3 flex flex-col items-center gap-2 min-w-[130px] ${
+        isLeak ? 'bg-red-500/10 border-red-500/30' : 'bg-green-500/10 border-green-500/25'}`}>
+        <div className={`w-12 h-12 rounded-full flex items-center justify-center text-xl border-2 ${
+          isLeak ? 'bg-red-500/20 border-red-500 text-red-400' : 'bg-green-500/15 border-green-500 text-green-400'}`}>
+          <i className={`fa-solid ${isLeak ? 'fa-triangle-exclamation' : 'fa-shield-check'}`}></i>
+        </div>
+        <p className={`text-xl font-extrabold ${isLeak ? 'text-red-400' : 'text-green-400'}`}>
+          {isLeak ? 'LEAK' : 'NO LEAK'}
+        </p>
+        <p className={`text-2xl font-mono font-extrabold -mt-1 ${isLeak ? 'text-red-300' : 'text-green-300'}`}>{pct}%</p>
+        <div className="w-full space-y-1">
+          {[
+            { label: 'P(No Leak)', val: p_no_leak, color: 'bg-green-500', textColor: 'text-green-400' },
+            { label: 'P(Leak)',    val: p_leak,    color: 'bg-red-500',   textColor: 'text-red-400'   },
+          ].map(row => (
+            <div key={row.label}>
+              <div className="flex justify-between text-[9px] mb-0.5">
+                <span className={row.textColor}>{row.label}</span>
+                <span className={`${row.textColor} font-mono`}>{Math.round((row.val || 0) * 100)}%</span>
+              </div>
+              <div className="w-full bg-slate-800 rounded-full h-1">
+                <div className={`h-1 rounded-full ${row.color} transition-all duration-500`}
+                     style={{ width: `${Math.round((row.val || 0) * 100)}%` }} />
+              </div>
+            </div>
+          ))}
+        </div>
+      </div>
+    );
+  }
+
+  function ChannelPanel({ chNum, data, accentColor }) {
+    const { LineChart, Line, BarChart, Bar, XAxis, YAxis, CartesianGrid,
+            Tooltip, ResponsiveContainer, Cell } = Recharts;
+
+    if (!data) {
+      const collected = serialStatus.sample_count % 500 || (serialStatus.sample_count > 0 ? 500 : 0);
+      const pct       = Math.min(Math.round((collected / 500) * 100), 100);
+      const secsLeft  = Math.ceil((500 - collected) / 50);
+      return (
+        <div className="bg-slate-900 border border-slate-800 rounded-xl p-6 flex flex-col items-center justify-center gap-4 min-h-96">
+          <div className="w-12 h-12 rounded-full bg-slate-800 border border-slate-700 flex items-center justify-center">
+            <i className="fa-solid fa-satellite-dish text-slate-600 text-xl animate-pulse"></i>
+          </div>
+          <div className="text-center">
+            <p className="text-[12px] text-slate-400 font-semibold">
+              CH{chNum} — {chNum === 1 ? 'Building M · ADXL345 #1' : 'Building C · ADXL345 #2'}
+            </p>
+            <p className="text-[11px] text-slate-500 mt-1">
+              {isConn ? `Collecting 10 s window… result in ~${secsLeft}s` : 'Connect ESP32 to start inference'}
+            </p>
+          </div>
+          {isConn && (
+            <div className="w-48 flex flex-col gap-1">
+              <div className="w-full bg-slate-800 rounded-full h-2">
+                <div className="h-2 rounded-full bg-indigo-500 transition-all duration-1000"
+                     style={{ width: `${pct}%` }} />
+              </div>
+              <div className="flex justify-between text-[9px] text-slate-600 font-mono">
+                <span>{collected} / 500 samples</span>
+                <span>{pct}%</span>
+              </div>
+            </div>
+          )}
+        </div>
+      );
+    }
+
+    const isLeak   = data.prediction === 1;
+    const statusCls = data.ch_status === 'ACTIVITY_DETECTED' ? 'text-red-400 animate-pulse'
+                    : data.ch_status === 'MONITORING'        ? 'text-cyan-400'
+                    : 'text-slate-500';
+
+    // Waveform data
+    const waveData = (data.raw || []).map((v, i) => ({
+      i, raw: v, filtered: data.filtered ? data.filtered[i] : undefined,
+    }));
+
+    // Feature data for bar chart — absolute value, sorted by magnitude
+    const featData = data.features
+      ? Object.entries(data.features)
+          .filter(([k]) => k !== 'sensor_type')
+          .map(([k, v]) => ({ name: k, absVal: Math.abs(Number(v)), rawVal: Number(v) }))
+      : [];
+
+    const maxAbsVal = Math.max(...featData.map(f => f.absVal), 1e-10);
+    const normalizedFeat = featData.map(f => ({
+      ...f,
+      normPct: (f.absVal / maxAbsVal) * 100,
+    }));
+
+    const TOP5 = ['zero_cross', 'band_low_rms', 'band_low', 'spec_rolloff', 'spec_centroid'];
+
+    return (
+      <div className="flex flex-col gap-3">
+
+        {/* Header */}
+        <div className={`bg-slate-900 border rounded-xl px-5 pt-4 pb-4 flex justify-between items-start gap-4 ${
+          isLeak ? 'border-red-500/40 shadow-red-500/10 shadow-lg' : 'border-slate-800'}`}>
+          <div>
+            <p className="text-[10px] uppercase tracking-widest text-slate-500 font-semibold">
+              Channel {chNum} · {chNum === 1 ? 'Building M — ADXL345 #1' : 'Building C — ADXL345 #2'}
+            </p>
+            <p className={`text-[11px] font-semibold mt-0.5 ${statusCls}`}>
+              {data.ch_status}
+              {data.ts && <span className="text-slate-600 font-normal ml-2">{new Date(data.ts).toLocaleTimeString()}</span>}
+            </p>
+          </div>
+          <PredictionBadge
+            prediction={data.prediction}
+            confidence={data.confidence}
+            p_leak={data.p_leak}
+            p_no_leak={data.p_no_leak}
+            model_loaded={data.model_loaded}
+          />
+        </div>
+
+        {/* Raw + Filtered Waveform */}
+        <div className="bg-slate-900 border border-slate-800 rounded-xl p-4 flex flex-col gap-2">
+          <div className="flex justify-between items-center">
+            <p className="text-xs font-bold text-white flex items-center gap-2">
+              <i className="fa-solid fa-wave-square text-cyan-400"></i>
+              Signal Waveform · CH{chNum}
+              <span className="text-[9px] text-slate-500 font-normal">{(data.raw || []).length} samples @ ~50 Hz</span>
+            </p>
+            <div className="flex gap-3 text-[10px] text-slate-400">
+              <span className="flex items-center gap-1"><span className="w-3 h-0.5 bg-cyan-400 inline-block"></span>Raw</span>
+              <span className="flex items-center gap-1"><span className="w-3 h-0.5 bg-amber-400 inline-block"></span>Filtered</span>
+            </div>
+          </div>
+          <div className="h-40">
+            <ResponsiveContainer width="100%" height="100%">
+              <LineChart data={waveData} margin={{ top: 2, right: 6, left: -22, bottom: 0 }}>
+                <CartesianGrid strokeDasharray="3 3" stroke="#1e293b" />
+                <XAxis dataKey="i" tick={{ fill: '#475569', fontSize: 8 }} interval="preserveStartEnd" />
+                <YAxis tick={{ fill: '#475569', fontSize: 8 }} domain={['auto', 'auto']} />
+                <Tooltip contentStyle={ttStyle} formatter={(v) => [v !== undefined ? v.toFixed(5) : '—', '']} />
+                <Line type="monotone" dataKey="raw"      name="Raw (g)"     stroke="#22d3ee" strokeWidth={1.5} dot={false} isAnimationActive={false} />
+                <Line type="monotone" dataKey="filtered" name="Filtered (g)" stroke="#fbbf24" strokeWidth={1.5} dot={false} isAnimationActive={false} />
+              </LineChart>
+            </ResponsiveContainer>
+          </div>
+        </div>
+
+        {/* Feature Bar Chart */}
+        {normalizedFeat.length > 0 && (
+          <div className="bg-slate-900 border border-slate-800 rounded-xl p-4 flex flex-col gap-3">
+            <div className="flex justify-between items-center">
+              <p className="text-xs font-bold text-white flex items-center gap-2">
+                <i className="fa-solid fa-chart-bar text-indigo-400"></i>
+                Extracted Features · CH{chNum}
+              </p>
+              <span className="text-[9px] bg-indigo-500/15 text-indigo-300 px-2 py-0.5 rounded font-semibold">
+                19 features · normalised height
+              </span>
+            </div>
+            <div className="h-36">
+              <ResponsiveContainer width="100%" height="100%">
+                <BarChart data={normalizedFeat} margin={{ top: 2, right: 4, left: -20, bottom: 28 }}>
+                  <CartesianGrid strokeDasharray="3 3" stroke="#1e293b" vertical={false} />
+                  <XAxis dataKey="name" tick={{ fill: '#475569', fontSize: 7 }}
+                         angle={-45} textAnchor="end" interval={0} />
+                  <YAxis tick={{ fill: '#475569', fontSize: 8 }} domain={[0, 100]}
+                         tickFormatter={v => `${v}%`} />
+                  <Tooltip
+                    contentStyle={ttStyle}
+                    formatter={(_, __, props) => [props.payload.rawVal.toExponential(3), props.payload.name]} />
+                  <Bar dataKey="normPct" radius={[2, 2, 0, 0]} maxBarSize={18} isAnimationActive={false}>
+                    {normalizedFeat.map((f, i) => (
+                      <Cell key={i}
+                        fill={TOP5.includes(f.name) ? '#818cf8'
+                              : f.normPct > 50     ? '#22d3ee'
+                              :                      '#334155'} />
+                    ))}
+                  </Bar>
+                </BarChart>
+              </ResponsiveContainer>
+            </div>
+
+            {/* Feature value grid */}
+            <div className="grid grid-cols-5 gap-1">
+              {normalizedFeat.map(f => (
+                <div key={f.name} className={`rounded px-1.5 py-1 text-center border ${
+                  TOP5.includes(f.name)
+                    ? 'bg-indigo-500/10 border-indigo-500/20'
+                    : 'bg-slate-800/40 border-slate-700/20'}`}>
+                  <p className="text-[8px] text-slate-500 font-mono truncate">{f.name}</p>
+                  <p className={`text-[10px] font-mono font-bold ${
+                    TOP5.includes(f.name) ? 'text-indigo-300' : 'text-slate-300'}`}>
+                    {Math.abs(f.rawVal) >= 1000
+                      ? f.rawVal.toExponential(1)
+                      : f.rawVal.toFixed(3)}
+                  </p>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+      </div>
+    );
+  }
+
+  return (
+    <div className="flex flex-col gap-5">
+
+      {/* ── Connection panel ── */}
+      <section className="bg-slate-900 border border-slate-800 rounded-xl p-5">
+        <div className="flex flex-wrap items-center justify-between gap-4">
+          <div className="flex items-center gap-4">
+            <div className="bg-indigo-600/15 p-3 rounded-xl border border-indigo-600/20">
+              <i className="fa-solid fa-brain text-indigo-400 text-xl"></i>
+            </div>
+            <div>
+              <h2 className="font-bold text-white text-base flex flex-wrap items-center gap-2">
+                Real-Time AI Inference
+                <span className="text-[10px] bg-indigo-500/15 text-indigo-300 px-2 py-0.5 rounded font-semibold">ExtraTreesClassifier</span>
+                <span className="text-[10px] bg-purple-500/15 text-purple-300 px-2 py-0.5 rounded font-semibold">20 DSP features</span>
+                <span className="text-[10px] bg-cyan-500/15 text-cyan-300 px-2 py-0.5 rounded font-semibold">10 s window · result every 10 s</span>
+              </h2>
+              <p className="text-[11px] text-slate-400 mt-0.5">
+                Python backend reads ESP32 serial · collects 500 samples (10 s) · bandpass + FFT · classify · result pushed via SSE
+              </p>
+            </div>
+          </div>
+
+          <div className="flex items-center gap-3 flex-wrap">
+            <select
+              title="Serial port"
+              value={selPort}
+              onChange={e => setSelPort(e.target.value)}
+              disabled={isConn}
+              className="bg-slate-800 border border-slate-700 text-slate-300 text-[12px] font-mono px-3 py-2 rounded-lg focus:outline-none focus:border-indigo-500 disabled:opacity-50">
+              {ports.length > 0
+                ? ports.map(p => <option key={p.port} value={p.port}>{p.port} — {p.description}</option>)
+                : <option value={selPort}>{selPort}</option>}
+            </select>
+
+            {!isConn ? (
+              <button onClick={connect}
+                className="flex items-center gap-2 px-5 py-2 bg-indigo-600 hover:bg-indigo-500 text-white text-sm font-semibold rounded-lg transition-colors shadow-lg shadow-indigo-600/20">
+                <i className="fa-solid fa-plug"></i> Connect &amp; Infer
+              </button>
+            ) : (
+              <button onClick={disconnect}
+                className="flex items-center gap-2 px-4 py-2 bg-red-600 hover:bg-red-500 text-white text-sm font-semibold rounded-lg transition-colors">
+                <i className="fa-solid fa-plug-circle-xmark"></i> Disconnect
+              </button>
+            )}
+
+            <div className={`flex items-center gap-2 px-3 py-2 rounded-lg border text-[11px] font-semibold ${
+              isConn
+                ? 'bg-green-500/15 border-green-500/30 text-green-400'
+                : 'bg-slate-800 border-slate-700 text-slate-400'}`}>
+              <span className={`w-2 h-2 rounded-full inline-block ${isConn ? 'bg-green-400 animate-pulse' : 'bg-slate-600'}`}></span>
+              {isConn
+                ? `${serialStatus.port} · ${serialStatus.sample_count} samples`
+                : 'Disconnected'}
+            </div>
+          </div>
+        </div>
+
+        <div className="mt-3 flex items-start gap-2 bg-amber-500/10 border border-amber-500/20 rounded-lg px-3 py-2.5 text-[11px] text-amber-300/90">
+          <i className="fa-solid fa-triangle-exclamation text-amber-400 mt-0.5 shrink-0"></i>
+          <span>
+            Close Arduino Serial Monitor and the <strong>Live Monitor</strong> WebSerial connection before using this page.
+            The Python backend holds exclusive access to the serial port.
+          </span>
+        </div>
+
+        {serialStatus.error && (
+          <div className="mt-2 flex items-center gap-2 bg-red-500/10 border border-red-500/30 rounded-lg px-3 py-2 text-[11px] text-red-300">
+            <i className="fa-solid fa-circle-xmark text-red-400 shrink-0"></i>
+            {serialStatus.error}
+          </div>
+        )}
+      </section>
+
+      {/* ── Channel panels ── */}
+      <div className="grid grid-cols-2 gap-4">
+        <ChannelPanel chNum={1} data={ch1Data} accentColor="#22d3ee" />
+        <ChannelPanel chNum={2} data={ch2Data} accentColor="#a855f7" />
+      </div>
+
+      {/* ── Info footer ── */}
+      <div className="bg-slate-900/50 border border-slate-800 rounded-xl p-4 text-[11px] text-slate-500 leading-relaxed">
+        <i className="fa-solid fa-circle-info text-blue-400 mr-2"></i>
+        <strong className="text-slate-400">Note:</strong>{' '}
+        Model was trained on 25 641 Hz accelerometer data. The ESP32 streams at ~50 Hz;
+        500 samples (10 s) are buffered then resampled (scipy.signal.resample) to 25 641 samples before feature extraction.
+        Prediction updates every ~10 s (no overlap). Spectral features above 25 Hz (the Nyquist of the stream) will be near zero —
+        time-domain features and low-frequency bands remain meaningful.
+        For highest accuracy, retrain the model on data streamed at 400 Hz ODR (burst mode).
+      </div>
+    </div>
+  );
+}
+
 // ── MAIN APP ───────────────────────────────────────────
 function App() {
   const [activeId, setActiveId]     = useState(1);
@@ -1335,6 +1718,15 @@ function App() {
           <i className="fa-solid fa-shield-halved"></i> Risk &amp; Analysis
           {page === 'analysis' && <span className="w-1.5 h-1.5 rounded-full bg-indigo-400 animate-pulse inline-block"></span>}
         </button>
+        <button onClick={() => setPage('inference')}
+          className={`flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-semibold transition-colors ${
+            page === 'inference'
+              ? 'bg-purple-600 text-white shadow-lg shadow-purple-600/20'
+              : 'bg-slate-900 text-slate-400 hover:bg-slate-800 border border-slate-800'
+          }`}>
+          <i className="fa-solid fa-brain"></i> AI Inference
+          {page === 'inference' && <span className="w-1.5 h-1.5 rounded-full bg-purple-400 animate-pulse inline-block"></span>}
+        </button>
       </div>
 
       {/* ── LIVE MONITOR PAGE ── */}
@@ -1342,6 +1734,9 @@ function App() {
 
       {/* ── RISK & ANALYSIS PAGE ── */}
       {page === 'analysis' && <AnalysisPage />}
+
+      {/* ── AI INFERENCE PAGE ── */}
+      {page === 'inference' && <InferencePage />}
 
       {page === 'dashboard' && <>
       {/* ── OVERVIEW ── */}

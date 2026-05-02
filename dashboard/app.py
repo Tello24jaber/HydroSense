@@ -19,6 +19,7 @@ import json
 import math
 import os
 import random
+import threading
 import time
 import uuid
 from collections import deque
@@ -28,12 +29,22 @@ from typing import Optional
 
 import joblib
 import numpy as np
+import scipy.signal
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
+from scipy.stats import kurtosis as _scipy_kurtosis, skew as _scipy_skew
 from sse_starlette.sse import EventSourceResponse
+
+try:
+    import serial
+    import serial.tools.list_ports
+    _SERIAL_AVAILABLE = True
+except ImportError:
+    _SERIAL_AVAILABLE = False
+    print("[HydroSense] pyserial not installed — serial inference disabled")
 
 # ── Paths ────────────────────────────────────────────────────────────────────
 BASE_DIR    = Path(__file__).resolve().parent
@@ -353,6 +364,342 @@ async def sse_stream(request: Request):
             await asyncio.sleep(0.25)
 
     return EventSourceResponse(event_generator())
+
+
+# ════════════════════════════════════════════════════════════════════════════════
+# REAL-TIME SERIAL INFERENCE ENGINE
+# ════════════════════════════════════════════════════════════════════════════════
+
+# ── Inference constants (mirrors config.py) ────────────────────────────────────
+_ACCEL_FS       = 25641
+_ACCEL_LOW_CUT  = 10
+_ACCEL_HIGH_CUT = 1000
+_FILTER_ORDER   = 4
+_WINDOW_SIZE    = 25641   # resample target for model (1 s @ 25641 Hz)
+_REAL_FS        = 50      # firmware streams at ~50 Hz (delay 20 ms)
+_WINDOW_SAMPLES = 500     # 10 seconds of samples at _REAL_FS
+_HOP_SAMPLES    = 500     # no overlap — new result only after full 10 s window collected
+
+# Feature order must match training CSV columns
+_FEATURE_ORDER = [
+    "mean", "variance", "rms", "kurtosis", "skewness", "peak", "crest_factor",
+    "zero_cross", "spec_mean", "spec_var", "spec_max", "spec_entropy",
+    "spec_centroid", "spec_rolloff", "band_low", "band_mid", "band_high",
+    "band_low_rms", "band_high_rms", "sensor_type",
+]
+
+# ── Serial state (thread-safe via _serial_lock) ────────────────────────────────
+_serial_lock   = threading.Lock()
+_infer_lock    = threading.Lock()
+_serial_running = False
+_serial_thread: Optional[threading.Thread] = None
+
+_serial_state: dict = {
+    "connected":    False,
+    "port":         None,
+    "error":        None,
+    "sample_count": 0,
+    "last_ts":      None,
+}
+
+# Per-channel sliding sample buffers (only accessed from serial thread)
+_ch1_buf: list = []
+_ch2_buf: list = []
+_ch1_new = 0   # samples added since last inference
+_ch2_new = 0
+
+# Latest inference results (updated by serial thread, read by SSE)
+_latest_ch1: Optional[dict] = None
+_latest_ch2: Optional[dict] = None
+_infer_version: int = 0    # incremented each time either channel updates
+
+
+# ── DSP helpers ───────────────────────────────────────────────────────────────
+
+def _dsp_window(sig: np.ndarray, fs: int, low_cut: float, high_cut: float):
+    """Detrend → bandpass → Hann-windowed FFT. Returns (filtered, spec, freqs)."""
+    sig = scipy.signal.detrend(sig)
+    nyq = 0.5 * fs
+    b, a = scipy.signal.butter(_FILTER_ORDER,
+                                [low_cut / nyq, high_cut / nyq],
+                                btype="band")
+    filt  = scipy.signal.filtfilt(b, a, sig)
+    spec  = np.abs(np.fft.rfft(filt * np.hanning(len(filt))))
+    freqs = np.fft.rfftfreq(len(filt), d=1.0 / fs)
+    return filt, spec, freqs
+
+
+def _extract_features(sig: np.ndarray, spec: np.ndarray, freqs: np.ndarray) -> dict:
+    rms      = float(np.sqrt(np.mean(sig ** 2)))
+    peak     = float(np.max(np.abs(sig)))
+    spec_sum = spec.sum() + 1e-12
+    spec_n   = spec / spec_sum
+    centroid = float(np.sum(freqs * spec) / spec_sum)
+    n        = len(spec)
+    low_e    = spec[:n//3].sum()
+    mid_e    = spec[n//3:2*n//3].sum()
+    high_e   = spec[2*n//3:].sum()
+    total_e  = low_e + mid_e + high_e + 1e-12
+    cumsum   = np.cumsum(spec)
+    r_idx    = int(np.searchsorted(cumsum, 0.85 * cumsum[-1]))
+    rolloff  = float(freqs[min(r_idx, len(freqs) - 1)])
+    return {
+        "mean":          float(np.mean(sig)),
+        "variance":      float(np.var(sig)),
+        "rms":           rms,
+        "kurtosis":      float(_scipy_kurtosis(sig)),
+        "skewness":      float(_scipy_skew(sig)),
+        "peak":          peak,
+        "crest_factor":  peak / rms if rms > 0 else 0.0,
+        "zero_cross":    int(np.sum(np.diff(np.sign(sig)) != 0)),
+        "spec_mean":     float(np.mean(spec)),
+        "spec_var":      float(np.var(spec)),
+        "spec_max":      float(np.max(spec)),
+        "spec_entropy":  float(-np.sum(spec_n * np.log(spec_n + 1e-12))),
+        "spec_centroid": centroid,
+        "spec_rolloff":  rolloff,
+        "band_low":      float(low_e  / total_e),
+        "band_mid":      float(mid_e  / total_e),
+        "band_high":     float(high_e / total_e),
+        "band_low_rms":  float(np.sqrt(np.mean(spec[:n//3] ** 2))),
+        "band_high_rms": float(np.sqrt(np.mean(spec[2*n//3:] ** 2))),
+        "sensor_type":   1,
+    }
+
+
+def _run_inference(samples: list, channel: int, ch_status: str) -> dict:
+    """
+    Full pipeline on the last _WINDOW_SAMPLES of Z-axis data at _REAL_FS Hz:
+      1. bandpass-filter at original rate  → filtered waveform for display
+      2. resample to _ACCEL_FS            → match training sample rate
+      3. DSP + feature extraction         → 20 features
+      4. StandardScaler + predict         → Leak / No-Leak + confidence
+    """
+    sig_orig = np.array(samples[-_WINDOW_SAMPLES:], dtype=np.float64)
+
+    # ── Filtered signal for visualisation (at original _REAL_FS) ──────────────
+    nyq_orig    = 0.5 * _REAL_FS
+    hi_clip     = min(_ACCEL_HIGH_CUT, nyq_orig * 0.9)  # stay below Nyquist
+    try:
+        b2, a2 = scipy.signal.butter(_FILTER_ORDER,
+                                      [_ACCEL_LOW_CUT / nyq_orig, hi_clip / nyq_orig],
+                                      btype="band")
+        sig_filt_disp = scipy.signal.filtfilt(b2, a2, sig_orig).tolist()
+    except Exception:
+        sig_filt_disp = sig_orig.tolist()
+
+    features    = None
+    prediction  = None
+    confidence  = None
+    p_no_leak   = None
+    p_leak      = None
+
+    if _model is not None and _scaler is not None:
+        try:
+            # Resample to training FS
+            sig_rs = scipy.signal.resample(sig_orig, _WINDOW_SIZE)
+            # DSP pipeline
+            filt, spec, freqs = _dsp_window(sig_rs, _ACCEL_FS,
+                                             _ACCEL_LOW_CUT, _ACCEL_HIGH_CUT)
+            feats = _extract_features(filt, spec, freqs)
+            X     = _scaler.transform([[feats[k] for k in _FEATURE_ORDER]])
+            pred  = int(_model.predict(X)[0])
+            proba = _model.predict_proba(X)[0]
+            prediction  = pred
+            confidence  = float(proba[pred])
+            p_no_leak   = float(proba[0])
+            p_leak      = float(proba[1])
+            features    = {k: float(v) for k, v in feats.items()}
+        except Exception as exc:
+            print(f"[Inference] ch{channel}: {exc}")
+
+    return {
+        "channel":      channel,
+        "ch_status":    ch_status,
+        "raw":          sig_orig.tolist(),
+        "filtered":     sig_filt_disp,
+        "features":     features,
+        "prediction":   prediction,
+        "confidence":   confidence,
+        "p_no_leak":    p_no_leak,
+        "p_leak":       p_leak,
+        "model_loaded": _model is not None,
+        "ts":           datetime.now(timezone.utc).isoformat(),
+    }
+
+
+# ── CSV row parser ─────────────────────────────────────────────────────────────
+
+def _parse_row(line: str) -> Optional[dict]:
+    line = line.strip()
+    if not line or line.startswith('[') or line.startswith('T'):
+        return None
+    parts = line.split(',')
+    if len(parts) != 15:
+        return None
+    try:
+        nums = list(map(float, parts[:13]))
+    except ValueError:
+        return None
+    s1 = parts[13].strip().upper()
+    s2 = parts[14].strip().upper()
+    valid = {"SLEEP", "MONITORING", "ACTIVITY_DETECTED"}
+    if s1 not in valid or s2 not in valid:
+        return None
+    return {
+        "timeMs":    int(nums[0]),
+        "a1x": nums[1], "a1y": nums[2], "a1z": nums[3], "a1mag": nums[4],
+        "a2x": nums[5], "a2y": nums[6], "a2z": nums[7], "a2mag": nums[8],
+        "sw1": int(nums[9]), "sw2": int(nums[10]),
+        "ch1Active": int(nums[11]), "ch2Active": int(nums[12]),
+        "ch1Status": s1, "ch2Status": s2,
+    }
+
+
+# ── Background serial reader thread ───────────────────────────────────────────
+
+def _serial_reader(port: str):
+    global _serial_running
+    global _ch1_buf, _ch2_buf, _ch1_new, _ch2_new
+    global _latest_ch1, _latest_ch2, _infer_version
+
+    _ch1_buf, _ch2_buf = [], []
+    _ch1_new = _ch2_new = 0
+
+    raw_buf = ""
+    conn    = None
+    try:
+        conn = serial.Serial(port, baudrate=115200, timeout=1.0)
+        with _serial_lock:
+            _serial_state.update(connected=True, port=port, error=None)
+        print(f"[Serial] Connected → {port}")
+
+        while _serial_running:
+            try:
+                waiting = conn.in_waiting or 1
+                chunk   = conn.read(min(waiting, 4096)).decode("utf-8", errors="replace")
+                raw_buf += chunk
+                lines, raw_buf = raw_buf.rsplit('\n', 1) if '\n' in raw_buf else ("", raw_buf)
+                for line in lines.split('\n'):
+                    row = _parse_row(line)
+                    if row is None:
+                        continue
+
+                    _ch1_buf.append(row["a1z"])
+                    _ch2_buf.append(row["a2z"])
+                    _ch1_new += 1
+                    _ch2_new += 1
+
+                    # Trim buffers to 4× window
+                    max_buf = _WINDOW_SAMPLES * 4
+                    if len(_ch1_buf) > max_buf:
+                        _ch1_buf = _ch1_buf[-_WINDOW_SAMPLES * 2:]
+                    if len(_ch2_buf) > max_buf:
+                        _ch2_buf = _ch2_buf[-_WINDOW_SAMPLES * 2:]
+
+                    with _serial_lock:
+                        _serial_state["sample_count"] += 1
+                        _serial_state["last_ts"] = datetime.now(timezone.utc).isoformat()
+
+                    # Trigger inference every hop
+                    if len(_ch1_buf) >= _WINDOW_SAMPLES and _ch1_new >= _HOP_SAMPLES:
+                        _ch1_new = 0
+                        result = _run_inference(_ch1_buf, 1, row["ch1Status"])
+                        with _infer_lock:
+                            _latest_ch1    = result
+                            _infer_version += 1
+
+                    if len(_ch2_buf) >= _WINDOW_SAMPLES and _ch2_new >= _HOP_SAMPLES:
+                        _ch2_new = 0
+                        result = _run_inference(_ch2_buf, 2, row["ch2Status"])
+                        with _infer_lock:
+                            _latest_ch2    = result
+                            _infer_version += 1
+
+            except serial.SerialException as e:
+                print(f"[Serial] Read error: {e}")
+                break
+            except Exception as e:
+                print(f"[Serial] Unexpected: {e}")
+                time.sleep(0.05)
+
+    except serial.SerialException as e:
+        with _serial_lock:
+            _serial_state.update(connected=False, error=str(e))
+        print(f"[Serial] Failed to connect: {e}")
+    finally:
+        if conn and conn.is_open:
+            conn.close()
+        with _serial_lock:
+            _serial_state.update(connected=False, port=None)
+        print("[Serial] Disconnected")
+
+
+# ── Serial API endpoints ───────────────────────────────────────────────────────
+
+@app.get("/api/serial/ports")
+async def api_serial_ports():
+    if not _SERIAL_AVAILABLE:
+        return {"ports": [], "error": "pyserial not installed"}
+    ports = [{"port": p.device, "description": p.description}
+             for p in serial.tools.list_ports.comports()]
+    return {"ports": ports}
+
+
+@app.post("/api/serial/connect")
+async def api_serial_connect(port: str = "COM4"):
+    global _serial_running, _serial_thread
+    if not _SERIAL_AVAILABLE:
+        return JSONResponse(status_code=503,
+                            content={"ok": False, "message": "pyserial not installed"})
+    with _serial_lock:
+        if _serial_state["connected"]:
+            return {"ok": False, "message": "Already connected"}
+    _serial_running = True
+    _serial_thread  = threading.Thread(target=_serial_reader, args=(port,), daemon=True)
+    _serial_thread.start()
+    await asyncio.sleep(0.8)
+    with _serial_lock:
+        ok  = _serial_state["connected"]
+        err = _serial_state["error"]
+    return {"ok": ok, "port": port, "message": "Connected" if ok else (err or "Failed")}
+
+
+@app.post("/api/serial/disconnect")
+async def api_serial_disconnect():
+    global _serial_running
+    _serial_running = False
+    return {"ok": True, "message": "Disconnecting"}
+
+
+@app.get("/api/serial/status")
+async def api_serial_status():
+    with _serial_lock:
+        return dict(_serial_state)
+
+
+# ── Inference SSE stream ───────────────────────────────────────────────────────
+
+@app.get("/stream/inference")
+async def inference_stream(request: Request):
+    async def gen():
+        last_v = -1
+        while True:
+            if await request.is_disconnected():
+                break
+            with _infer_lock:
+                v   = _infer_version
+                ch1 = _latest_ch1
+                ch2 = _latest_ch2
+            if v != last_v:
+                last_v = v
+                with _serial_lock:
+                    ser = dict(_serial_state)
+                payload = {"serial": ser, "ch1": ch1, "ch2": ch2}
+                yield {"event": "inference", "data": json.dumps(payload)}
+            await asyncio.sleep(0.2)
+
+    return EventSourceResponse(gen())
 
 
 if __name__ == "__main__":
